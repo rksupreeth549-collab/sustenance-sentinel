@@ -1,0 +1,9 @@
+# Sustenance Sentinel — pilot deps
+anthropic>=0.40.0          # Claude agent brains
+mcp>=1.2.0                 # MCP client to talk to Swiggy Food MCP server
+apscheduler>=3.10.4        # meal-window + escalation-ladder timers
+pyyaml>=6.0                # profile config
+fastapi>=0.110.0           # optional dashboard
+uvicorn>=0.29.0            # dashboard server
+python-dotenv>=1.0.0       # load API keys from .env
+pytest>=8.0.0              # tests

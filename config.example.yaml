@@ -1,0 +1,51 @@
+# Sustenance Sentinel — cared-for profile.
+# Copy to config.yaml and edit. One profile per cared-for person.
+
+person_id: riya-01
+name: Riya
+relationship: partner          # drives the Messenger tone (partner / friend / parent / child)
+tone: warm-playful             # warm-playful | gentle | brief-practical
+
+# Where the Concierge looks for food.
+favorite_restaurants:          # name hints the Concierge searches for on Swiggy Food MCP
+  - "Punjabi By Nature"
+  - "FreshMenu"
+cuisines: [north-indian, healthy-bowls]
+comfort_foods: [dal makhani, paneer, khichdi, grilled bowl]
+
+# Guardian diet rules (deterministic checks in policy.py).
+diet:
+  vegetarian: true
+  exclude_tags: [fried, sugary-drink, dessert]   # dish tags that auto-veto
+  max_spice: 2                                    # 0..3
+  max_calories: 750                               # per dish; null to disable
+
+# Hard money ceilings — enforced in code, never by the model.
+spend_cap_per_meal: 400        # INR
+spend_cap_per_day: 900         # INR
+
+# Meal windows (24h local). Ladder runs inside each.
+meal_windows:
+  breakfast: ["08:00", "10:00"]
+  lunch:     ["12:30", "14:30"]
+  dinner:    ["19:30", "21:30"]
+
+# Escalation-ladder timing (minutes from window start).
+ladder:
+  nudge_after_min: 40          # gentle second message
+  last_call_before_end_min: 20 # soft-countdown last-call
+  countdown_min: 15            # opt-out window before an order fires
+
+address:
+  label: office
+  text: "Prestige Tech Park, Marathahalli, Bengaluru 560103"
+
+# Channels. "console" => printed locally (default for offline demo).
+channels:
+  cared_for: console           # console | telegram | twilio
+  caregiver: console
+
+caregiver_name: Arjun
+
+# confirm-first (pilot default, safe) or full-auto.
+autonomy: confirm-first
