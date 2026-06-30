@@ -45,13 +45,24 @@ silence→autonomous order, daily-cap-blown→Guardian veto — each with the ag
 
 ## Going live
 
-1. `cp .env.example .env` and set `ANTHROPIC_API_KEY` (agents use Claude instead of
-   template fallbacks) and `SWIGGY_MCP_URL` / `SWIGGY_MCP_TOKEN` (real Food MCP).
-2. Confirm the live Food MCP tool names in `mcp_client.py:SwiggyFoodMCP` (Phase 1) —
-   override via `SWIGGY_TOOL_SEARCH/MENU/ORDER` env if they differ from the docs.
+Confirmed against https://mcp.swiggy.com/builders/docs/ :
+- **Endpoint** `https://mcp.swiggy.com/food` — streamable HTTP, JSON-RPC.
+- **Auth** OAuth 2.1 + PKCE; `http://localhost` redirect allowed for dev (phone + OTP).
+- **Food tools (14)** — we use `search_restaurants`, `get_restaurant_menu`,
+  `update_food_cart`, `place_food_order`, `track_food_order`. Order flow is cart-based.
+
+Steps:
+1. `cp .env.example .env`, set `ANTHROPIC_API_KEY` (agents use Claude vs templates).
+2. Mint a token: `python -m sentinel.oauth` → paste into `SWIGGY_MCP_TOKEN`. Keep
+   `SWIGGY_MCP_URL=https://mcp.swiggy.com/food`. (Confirm OAuth URLs at
+   `/builders/docs/start/authenticate/`.)
 3. `cp config.example.yaml config.yaml`, edit the cared-for profile.
-4. Keep `autonomy: confirm-first` until you trust it. Production Swiggy access needs
-   their use-case + security review.
+4. Keep `autonomy: confirm-first` until trusted. Production access needs Swiggy's
+   use-case + security review (apply at `/builders/access/` with a demo video).
+
+> **Security:** `place_food_order` runs only inside our code path, behind the
+> Guardian. We deliberately do **not** expose it to Claude's native MCP connector —
+> letting the model place orders directly would bypass the code-enforced spend caps.
 
 ## Safety rails
 

@@ -87,51 +87,82 @@ class MockSwiggyFood:
         )
 
 
-# --- Real backend (Phase 1 wiring) ----------------------------------------
-class SwiggyFoodMCP:
-    """Thin wrapper over an MCP session to the Swiggy Food server.
+# --- Real backend ---------------------------------------------------------
+# Confirmed from https://mcp.swiggy.com/builders/docs/ :
+#   * Endpoint   : POST https://mcp.swiggy.com/food  (streamable HTTP, JSON-RPC)
+#   * Auth       : OAuth 2.1 + PKCE; http://localhost redirect allowed for dev.
+#   * Food server: 14 tools. The ones we use, and the real cart-based order flow:
+#       search_restaurants -> get_restaurant_menu / search_menu
+#         -> update_food_cart (add items) -> place_food_order -> track_food_order
+#       (also: get_addresses, get_food_cart, flush_food_cart, *_coupon, report_error)
+#
+# SECURITY: order placement stays in OUR code path, behind the Guardian. We do NOT
+# hand `place_food_order` to Claude's native MCP connector — letting the model call
+# it directly would bypass the code-enforced spend caps in policy.py.
+FOOD_ENDPOINT_DEFAULT = "https://mcp.swiggy.com/food"
 
-    Tool names default to placeholders; override via env once confirmed against
-    the live server in Phase 1 (the builder docs list the exact 18+ tools).
+TOOL_SEARCH = "search_restaurants"
+TOOL_MENU = "get_restaurant_menu"
+TOOL_CART_UPDATE = "update_food_cart"
+TOOL_ORDER = "place_food_order"
+TOOL_TRACK = "track_food_order"
+
+
+class SwiggyFoodMCP:
+    """Streamable-HTTP MCP client for the live Swiggy Food server.
+
+    Sync wrapper over the async `mcp` SDK (one asyncio.run per call — fine at
+    pilot scale). Needs a bearer token from the OAuth 2.1 + PKCE flow; see
+    `sentinel/oauth.py` for acquiring one (browser phone+OTP, localhost redirect).
     """
 
     def __init__(self, url: str, token: str | None = None):
-        self.url = url
+        self.url = url or FOOD_ENDPOINT_DEFAULT
         self.token = token
-        self.t_search = os.getenv("SWIGGY_TOOL_SEARCH", "search_restaurants")
-        self.t_menu = os.getenv("SWIGGY_TOOL_MENU", "get_menu")
-        self.t_order = os.getenv("SWIGGY_TOOL_ORDER", "place_order")
-        self._session = None  # lazily opened MCP ClientSession
 
-    def _ensure_session(self):
-        if self._session is None:
-            # Deferred import so the package loads without `mcp` installed.
-            from mcp import ClientSession  # noqa: F401
-            raise NotImplementedError(
-                "Connect ClientSession to SWIGGY_MCP_URL here once Phase 1 confirms "
-                "the live transport (stdio/HTTP) and auth from the builder docs."
-            )
-        return self._session
+    # -- async core: open a session, call one tool, return its structured result --
+    async def _call(self, tool: str, args: dict):
+        from mcp import ClientSession
+        from mcp.client.streamable_http import streamablehttp_client
 
+        headers = {"Authorization": f"Bearer {self.token}"} if self.token else None
+        async with streamablehttp_client(self.url, headers=headers) as (read, write, _):
+            async with ClientSession(read, write) as session:
+                await session.initialize()
+                result = await session.call_tool(tool, args)
+                return result.structuredContent or result.content
+
+    def _run(self, tool: str, args: dict):
+        import asyncio
+        return asyncio.run(self._call(tool, args))
+
+    # -- FoodClient interface (shapes normalized from live responses) --
     def search_restaurants(self, query: str, area: str) -> list[str]:
-        s = self._ensure_session()
-        res = s.call_tool(self.t_search, {"query": query, "area": area})
-        return [r["name"] for r in res]
+        res = self._run(TOOL_SEARCH, {"query": query, "location": area})
+        return [r["name"] for r in res.get("restaurants", res)]
 
     def get_menu(self, restaurant: str) -> list[Dish]:
-        s = self._ensure_session()
-        res = s.call_tool(self.t_menu, {"restaurant": restaurant})
-        return [Dish(restaurant=restaurant, **r) for r in res]
+        res = self._run(TOOL_MENU, {"restaurant_id": restaurant})
+        out: list[Dish] = []
+        for it in res.get("items", res):
+            out.append(Dish(
+                restaurant=restaurant, item=it["name"], price=int(it["price"]),
+                tags=it.get("tags", []), calories=it.get("calories"),
+                spice=it.get("spice", 0), vegetarian=it.get("is_veg", True),
+            ))
+        return out
 
     def place_order(self, restaurant: str, dish: Dish, address: str) -> OrderResult:
-        s = self._ensure_session()
-        res = s.call_tool(self.t_order, {
-            "restaurant": restaurant,
-            "items": [{"item": dish.item, "price": dish.price}],
-            "address": address,
+        # Real flow is cart-based: add to cart, then confirm the order.
+        self._run(TOOL_CART_UPDATE, {
+            "restaurant_id": restaurant,
+            "items": [{"name": dish.item, "quantity": 1}],
         })
+        res = self._run(TOOL_ORDER, {"address": address})
         return OrderResult(
-            order_ref=res["order_id"], total=res["total"], eta_min=res["eta_min"],
+            order_ref=res["order_id"],
+            total=int(res.get("total", dish.price)),
+            eta_min=int(res.get("eta_min", 0)),
             restaurant=restaurant, item=dish.item,
         )
 
