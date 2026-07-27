@@ -8,8 +8,9 @@ spend, no API key needed), driving four lunch scenarios through the Orchestrator
   C. Silence, full-auto, countdown elapses        -> autonomous order placed
   D. Explicit "order for me" but daily cap blown  -> Guardian VETO, no order
 
-Run:  python run_demo.py           # paced for recording
-      python run_demo.py --fast    # no delays
+Run:  python run_demo.py             # paced for recording (~52s)
+      python run_demo.py --fast      # no delays
+      python run_demo.py --speed 3   # stretch pauses 3x, to sit under a voiceover
 """
 from __future__ import annotations
 
@@ -38,9 +39,45 @@ W = 76              # console width
 FAST = "--fast" in sys.argv
 
 
+def _speed_arg() -> float:
+    """--speed N multiplies every pause, so the run can be stretched to sit
+    under a fixed-length voiceover track."""
+    if "--speed" in sys.argv:
+        i = sys.argv.index("--speed")
+        if i + 1 < len(sys.argv):
+            return float(sys.argv[i + 1])
+    return 1.0
+
+
+SPEED = _speed_arg()
+
+
 def pause(sec: float = 0.9):
     if not FAST:
-        time.sleep(sec)
+        time.sleep(sec * SPEED)
+
+
+# --- section timing manifest ------------------------------------------------
+# `--timings marks.json` records the wall-clock offset of each narration
+# section, so a voiceover clip can be muxed in at exactly the right moment.
+_T0 = time.perf_counter()
+_MARKS: list[dict] = []
+
+
+def mark(section: str):
+    _MARKS.append({"section": section, "at": round(time.perf_counter() - _T0, 2)})
+
+
+def dump_marks():
+    if "--timings" not in sys.argv:
+        return
+    i = sys.argv.index("--timings")
+    if i + 1 >= len(sys.argv):
+        return
+    import json
+    _MARKS.append({"section": "end", "at": round(time.perf_counter() - _T0, 2)})
+    with open(sys.argv[i + 1], "w", encoding="utf-8") as fh:
+        json.dump(_MARKS, fh, indent=2)
 
 
 def rule(ch: str = "="):
@@ -77,7 +114,10 @@ def verdict(text: str):
 
 
 def run_scenario(title: str, point: str, profile: Profile,
-                 ticks: list[tuple[float, str | None]], day: str, expect: str):
+                 ticks: list[tuple[float, str | None]], day: str, expect: str,
+                 section: str = ""):
+    if section:
+        mark(section)
     card(title, point)
     store = Store(db_path=tempfile.mktemp(suffix=".db"))
     orch = fresh_orchestrator(profile, store)
@@ -94,6 +134,7 @@ def run_scenario(title: str, point: str, profile: Profile,
 
 
 def intro(profile: Profile):
+    mark("01_opening")
     online = "ONLINE (Claude)" if LLM().online else "OFFLINE (template fallback)"
     live = bool(os.getenv("SWIGGY_MCP_URL"))
     food = "LIVE Swiggy MCP" if live else "MOCK Swiggy Food server (no real orders)"
@@ -133,6 +174,7 @@ def intro(profile: Profile):
     print(f"  Autonomy     : {profile.autonomy}")
     pause(2.5)
 
+    mark("02_ladder")
     card("THE ESCALATION LADDER",
          "Why a forgotten reply can never trigger a wrong order")
     for line in [
@@ -150,6 +192,7 @@ def intro(profile: Profile):
 
 
 def outro():
+    mark("07_close")
     card("WHAT THE FOUR SCENARIOS SHOWED")
     for line in [
         "  A  replied 'had a sandwich'   -> understood, no order          SAFE",
@@ -179,13 +222,14 @@ def main():
         "SCENARIO A — she replies that she ate",
         "Free text, not a button. The Messenger has to understand it.",
         profile, [(0, None), (35, "had a sandwich at my desk")], "2026-07-20",
-        "She ate. No order placed. The window closes quietly.")
+        "She ate. No order placed. The window closes quietly.", "03_scenario_a")
 
     run_scenario(
         "SCENARIO B — she never replies (confirm-first)",
         "The case everyone gets wrong: she simply forgot to answer.",
         profile, [(0, None), (45, None), (105, None), (125, None)], "2026-07-21",
-        "Silence ordered NOTHING. No food arrives uninvited, no money spent.")
+        "Silence ordered NOTHING. No food arrives uninvited, no money spent.",
+        "04_scenario_b")
 
     auto = Profile.from_yaml(cfg)
     auto.autonomy = "full-auto"
@@ -193,13 +237,16 @@ def main():
         "SCENARIO C — she never replies (full-auto, opted in)",
         "Same silence. She has explicitly opted into autonomy.",
         auto, [(0, None), (45, None), (105, None), (125, None)], "2026-07-22",
-        "Concierge picked her comfort food, Guardian cleared it, order placed.")
+        "Concierge picked her comfort food, Guardian cleared it, order placed.",
+        "05_scenario_c")
 
     scenario_cap_blown(profile)
     outro()
+    dump_marks()
 
 
 def scenario_cap_blown(profile: Profile):
+    mark("06_scenario_d")
     card("SCENARIO D — she asks for food, but the day's budget is gone",
          "Guardian is code, not a prompt. It cannot be talked around.")
     day = "2026-07-23"

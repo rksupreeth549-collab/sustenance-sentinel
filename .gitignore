@@ -5,3 +5,7 @@ app.db
 *.db
 .pytest_cache/
 .venv/
+
+marks.json
+demo*.mp4
+voiceover*/
