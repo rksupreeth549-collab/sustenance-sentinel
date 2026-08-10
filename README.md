@@ -45,24 +45,37 @@ silence→autonomous order, daily-cap-blown→Guardian veto — each with the ag
 
 ## Going live
 
-Confirmed against https://mcp.swiggy.com/builders/docs/ :
+Verified against the live server, not just the docs:
 - **Endpoint** `https://mcp.swiggy.com/food` — streamable HTTP, JSON-RPC.
-- **Auth** OAuth 2.1 + PKCE; `http://localhost` redirect allowed for dev (phone + OTP).
-- **Food tools (14)** — we use `search_restaurants`, `get_restaurant_menu`,
-  `update_food_cart`, `place_food_order`, `track_food_order`. Order flow is cart-based.
+  Unauthenticated calls return `401 invalid_token` with a Bearer challenge.
+- **Auth** OAuth 2.1 + PKCE. The server's own
+  `/.well-known/oauth-authorization-server` confirms `/auth/authorize`,
+  `/auth/token`, `/auth/register`, scope `mcp:tools`, S256.
+- **No client_id to request** — Swiggy supports Dynamic Client Registration
+  (RFC 7591), so `sentinel/oauth.py` self-registers on first run.
+- **Food tools (17)** — cart-based ordering with a payment leg:
+  `search_restaurants` → `get_restaurant_menu` → `update_food_cart` →
+  `place_food_order` → `get_payment_options` → `confirm_order` → `track_food_order`.
+- **Tokens** last 5 days. The docs say no refresh token in v1.0, but the server
+  advertises the `refresh_token` grant, so we store and use one if issued.
 
 Steps:
-1. `cp .env.example .env`, set `ANTHROPIC_API_KEY` (agents use Claude vs templates).
-2. Mint a token: `python -m sentinel.oauth` → paste into `SWIGGY_MCP_TOKEN`. Keep
-   `SWIGGY_MCP_URL=https://mcp.swiggy.com/food`. (Confirm OAuth URLs at
-   `/builders/docs/start/authenticate/`.)
-3. `cp config.example.yaml config.yaml`, edit the cared-for profile.
-4. Keep `autonomy: confirm-first` until trusted. Production access needs Swiggy's
-   use-case + security review (apply at `/builders/access/` with a demo video).
+1. `pip install -r requirements.txt`
+2. `cp .env.example .env`, set `ANTHROPIC_API_KEY` (agents use Claude vs templates).
+3. `python -m sentinel.oauth` — opens the browser for phone + OTP, then caches the
+   token in `.swiggy_auth.json` (gitignored).
+4. `python verify_live.py` — read-only check: lists tools, pulls addresses, searches
+   restaurants, reads a live menu, and runs the Concierge + Guardian over it to show
+   what Sentinel *would* order. Places nothing.
+5. `cp config.example.yaml config.yaml`, edit the cared-for profile.
+6. Keep `autonomy: confirm-first` until trusted.
 
-> **Security:** `place_food_order` runs only inside our code path, behind the
-> Guardian. We deliberately do **not** expose it to Claude's native MCP connector —
-> letting the model place orders directly would bypass the code-enforced spend caps.
+> **Security.** Two independent locks on real money:
+> 1. `place_food_order` runs only inside our code path, behind the Guardian. It is
+>    deliberately **not** exposed to Claude's native MCP connector — letting the
+>    model order directly would bypass the code-enforced spend caps.
+> 2. Live ordering is refused outright unless `SWIGGY_ALLOW_REAL_ORDERS=1` is set
+>    in the environment. Unset, `place_order` raises rather than spending.
 
 ## Safety rails
 

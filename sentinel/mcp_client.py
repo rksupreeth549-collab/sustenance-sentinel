@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import os
 import uuid
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from typing import Protocol
 
@@ -93,19 +94,35 @@ class MockSwiggyFood:
 #   * Auth       : OAuth 2.1 + PKCE; http://localhost redirect allowed for dev.
 #   * Food server: 14 tools. The ones we use, and the real cart-based order flow:
 #       search_restaurants -> get_restaurant_menu / search_menu
-#         -> update_food_cart (add items) -> place_food_order -> track_food_order
-#       (also: get_addresses, get_food_cart, flush_food_cart, *_coupon, report_error)
+#         -> update_food_cart -> place_food_order -> get_payment_options
+#         -> confirm_order / check_payment_status -> track_food_order
+#   * Full Food surface is 17 tools; the rest we don't need yet are listed below.
 #
 # SECURITY: order placement stays in OUR code path, behind the Guardian. We do NOT
 # hand `place_food_order` to Claude's native MCP connector — letting the model call
 # it directly would bypass the code-enforced spend caps in policy.py.
 FOOD_ENDPOINT_DEFAULT = "https://mcp.swiggy.com/food"
 
+# Discover
+TOOL_ADDRESSES = "get_addresses"
 TOOL_SEARCH = "search_restaurants"
 TOOL_MENU = "get_restaurant_menu"
+TOOL_SEARCH_MENU = "search_menu"
+# Cart
+TOOL_CART_GET = "get_food_cart"
 TOOL_CART_UPDATE = "update_food_cart"
+TOOL_CART_FLUSH = "flush_food_cart"
+# Order + payment
 TOOL_ORDER = "place_food_order"
+TOOL_PAYMENT_OPTIONS = "get_payment_options"
+TOOL_PAYMENT_STATUS = "check_payment_status"
+TOOL_CONFIRM = "confirm_order"
+# Tracking
 TOOL_TRACK = "track_food_order"
+
+# Live ordering moves real money on a real Swiggy account. It stays off unless
+# the operator explicitly turns it on for this process.
+ALLOW_REAL_ORDERS = os.getenv("SWIGGY_ALLOW_REAL_ORDERS", "") == "1"
 
 
 class SwiggyFoodMCP:
@@ -118,53 +135,121 @@ class SwiggyFoodMCP:
 
     def __init__(self, url: str, token: str | None = None):
         self.url = url or FOOD_ENDPOINT_DEFAULT
+        if not token:
+            # Falls back to the cached OAuth token; won't pop a browser here.
+            from .oauth import get_token
+            token = get_token(interactive=False)
         self.token = token
 
-    # -- async core: open a session, call one tool, return its structured result --
-    async def _call(self, tool: str, args: dict):
+    # -- async core -------------------------------------------------------
+    # MCP SDK 2.x: `streamable_http_client` takes a preconfigured httpx2 client
+    # (there is no `headers=` kwarg) and yields a 2-tuple.
+    @asynccontextmanager
+    async def _session(self):
         from mcp import ClientSession
-        from mcp.client.streamable_http import streamablehttp_client
+        from mcp.client.streamable_http import (create_mcp_http_client,
+                                                streamable_http_client)
 
-        headers = {"Authorization": f"Bearer {self.token}"} if self.token else None
-        async with streamablehttp_client(self.url, headers=headers) as (read, write, _):
-            async with ClientSession(read, write) as session:
-                await session.initialize()
-                result = await session.call_tool(tool, args)
-                return result.structuredContent or result.content
+        headers = {"Authorization": f"Bearer {self.token}"} if self.token else {}
+        async with create_mcp_http_client(headers=headers) as http:
+            async with streamable_http_client(self.url, http_client=http) as (read, write):
+                async with ClientSession(read, write) as session:
+                    await session.initialize()
+                    yield session
+
+    async def _call(self, tool: str, args: dict):
+        async with self._session() as session:
+            result = await session.call_tool(tool, args)
+            return result.structuredContent or result.content
 
     def _run(self, tool: str, args: dict):
         import asyncio
         return asyncio.run(self._call(tool, args))
 
+    def list_tools(self) -> list[str]:
+        """Names the live server actually advertises — used to verify wiring."""
+        import asyncio
+
+        async def _go():
+            async with self._session() as session:
+                return [t.name for t in (await session.list_tools()).tools]
+
+        return asyncio.run(_go())
+
+    @staticmethod
+    def _rows(res, *keys):
+        """Live responses wrap their list under one of several keys."""
+        if isinstance(res, dict):
+            for k in keys:
+                if isinstance(res.get(k), list):
+                    return res[k]
+        return res if isinstance(res, list) else []
+
     # -- FoodClient interface (shapes normalized from live responses) --
+    def get_addresses(self) -> list[dict]:
+        return self._rows(self._run(TOOL_ADDRESSES, {}), "addresses", "data")
+
     def search_restaurants(self, query: str, area: str) -> list[str]:
         res = self._run(TOOL_SEARCH, {"query": query, "location": area})
-        return [r["name"] for r in res.get("restaurants", res)]
+        out = []
+        for r in self._rows(res, "restaurants", "results", "data"):
+            # Keep the id when present — get_restaurant_menu wants an id, not a name.
+            out.append(str(r.get("id") or r.get("restaurant_id") or r.get("name")))
+        return out
 
     def get_menu(self, restaurant: str) -> list[Dish]:
         res = self._run(TOOL_MENU, {"restaurant_id": restaurant})
         out: list[Dish] = []
-        for it in res.get("items", res):
+        for it in self._rows(res, "items", "menu", "data"):
+            price = it.get("price", it.get("final_price", 0))
             out.append(Dish(
-                restaurant=restaurant, item=it["name"], price=int(it["price"]),
-                tags=it.get("tags", []), calories=it.get("calories"),
-                spice=it.get("spice", 0), vegetarian=it.get("is_veg", True),
+                restaurant=restaurant, item=it.get("name", "?"),
+                price=int(float(price)),
+                tags=it.get("tags", []) or it.get("categories", []),
+                calories=it.get("calories"),
+                spice=it.get("spice", 0),
+                vegetarian=bool(it.get("is_veg", it.get("veg", True))),
             ))
         return out
 
     def place_order(self, restaurant: str, dish: Dish, address: str) -> OrderResult:
-        # Real flow is cart-based: add to cart, then confirm the order.
+        """Cart -> place -> pay. Refuses to run unless real ordering is enabled."""
+        if not ALLOW_REAL_ORDERS:
+            raise PermissionError(
+                "Refusing to place a REAL Swiggy order: SWIGGY_ALLOW_REAL_ORDERS is not "
+                "set to 1. This would spend real money on a real account."
+            )
+        self._run(TOOL_CART_FLUSH, {})  # start clean; stale carts corrupt the total
         self._run(TOOL_CART_UPDATE, {
             "restaurant_id": restaurant,
             "items": [{"name": dish.item, "quantity": 1}],
         })
-        res = self._run(TOOL_ORDER, {"address": address})
+        placed = self._run(TOOL_ORDER, {"address": address})
+        order_id = placed.get("order_id") or placed.get("id")
+
+        # v1 payment surface: cash goes straight through, UPI needs polling.
+        if placed.get("requires_payment") or placed.get("status") == "payment_pending":
+            opts = self._rows(self._run(TOOL_PAYMENT_OPTIONS, {"order_id": order_id}),
+                              "options", "payment_options", "data")
+            cash = next((o for o in opts
+                         if "cash" in str(o.get("type", o.get("name", ""))).lower()), None)
+            if not cash:
+                raise RuntimeError(
+                    f"Order {order_id} needs an online payment; Sentinel only "
+                    f"auto-completes cash-on-delivery. Options: {opts}"
+                )
+            self._run(TOOL_CONFIRM, {"order_id": order_id,
+                                     "payment_method": cash.get("type", "cash")})
+
         return OrderResult(
-            order_ref=res["order_id"],
-            total=int(res.get("total", dish.price)),
-            eta_min=int(res.get("eta_min", 0)),
+            order_ref=str(order_id),
+            total=int(float(placed.get("total", dish.price))),
+            eta_min=int(placed.get("eta_min", placed.get("eta", 0)) or 0),
             restaurant=restaurant, item=dish.item,
         )
+
+    def track(self, order_id: str) -> dict:
+        return self._run(TOOL_TRACK, {"order_id": order_id})
 
 
 def get_food_client() -> FoodClient:

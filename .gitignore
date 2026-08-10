@@ -9,3 +9,4 @@ app.db
 marks.json
 demo*.mp4
 voiceover*/
+.swiggy_auth.json
