@@ -10,3 +10,5 @@ marks.json
 demo*.mp4
 voiceover*/
 .swiggy_auth.json
+live_marks.json
+mock_marks.json

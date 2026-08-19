@@ -22,6 +22,7 @@ from __future__ import annotations
 import os
 import re
 import sys
+import time
 
 try:
     sys.stdout.reconfigure(encoding="utf-8")
@@ -50,7 +51,49 @@ def redact(text: str) -> str:
     return "[redacted]"
 
 
+# --- pacing + timing manifest (for narrated screen recordings) -------------
+# Network timing varies run to run, so offsets are captured DURING the actual
+# recorded run and written out; the voiceover is placed against those.
+def _flag(name: str, default: float) -> float:
+    if name in sys.argv:
+        i = sys.argv.index(name)
+        if i + 1 < len(sys.argv):
+            return float(sys.argv[i + 1])
+    return default
+
+
+DWELL = _flag("--dwell", 0.0)   # hold each step on screen for at least N seconds
+_T0 = time.perf_counter()
+_MARKS: list[dict] = []
+_step_start: float | None = None
+
+
+def _hold():
+    if _step_start is not None and DWELL:
+        remaining = DWELL - (time.perf_counter() - _step_start)
+        if remaining > 0:
+            time.sleep(remaining)
+
+
+def dump_marks():
+    _hold()
+    if "--timings" not in sys.argv:
+        return
+    i = sys.argv.index("--timings")
+    if i + 1 >= len(sys.argv):
+        return
+    import json
+    _MARKS.append({"section": "end", "at": round(time.perf_counter() - _T0, 2)})
+    with open(sys.argv[i + 1], "w", encoding="utf-8") as fh:
+        json.dump(_MARKS, fh, indent=2)
+
+
 def step(n: int, msg: str):
+    global _step_start
+    _hold()
+    _MARKS.append({"section": f"live_{n:02d}",
+                   "at": round(time.perf_counter() - _T0, 2)})
+    _step_start = time.perf_counter()
     print(f"\n[{n}] {msg}")
 
 
@@ -135,6 +178,7 @@ def main() -> int:
     print("\n" + "=" * W)
     print(" Live check complete. Real data, real tools, no order placed.")
     print("=" * W)
+    dump_marks()
     return 0
 
 

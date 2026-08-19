@@ -1,58 +1,105 @@
-# Voiceover narration — Sustenance Sentinel demo
+# Voiceover narration — Sustenance Sentinel demo (v2, live build)
 
-Seven clips, one per section. Each is written to fit inside its section's slot in
-the paced demo run at `--speed 3` (total video ≈ 2 min 39 s).
+Two recorded segments, concatenated:
 
-**Hard rule: a clip must not be longer than its budget.** If a generated clip runs
-over, regenerate it slightly faster or trim a sentence — do not let clips overlap.
+| Segment | Command | Length |
+|---|---|---|
+| **A — Live** | `verify_live.py --dwell 13 --timings live_marks.json` | ~84 s |
+| **B — Safety** | `run_demo.py --speed 2 --timings mock_marks.json` | ~106 s |
 
-Offsets below are from `marks.json`, produced by:
+Total ≈ **3 min 10 s**.
 
-```
-python run_demo.py --speed 3 --timings marks.json
-```
+**Hard rule: every clip must be SHORTER than its budget.** Measure each generated
+file and regenerate anything that runs over. Clips must never overlap.
 
-Regenerate that file rather than trusting these numbers if anything changes.
-
-| # | Section id | Starts at | Budget |
-|---|------------|-----------|--------|
-| 1 | `01_opening`    | 0:00.0 | 30.6 s |
-| 2 | `02_ladder`     | 0:30.6 | 17.6 s |
-| 3 | `03_scenario_a` | 0:48.2 | 17.3 s |
-| 4 | `04_scenario_b` | 1:05.5 | 25.3 s |
-| 5 | `05_scenario_c` | 1:30.8 | 26.8 s |
-| 6 | `06_scenario_d` | 1:57.6 | 21.4 s |
-| 7 | `07_close`      | 2:19.0 | 20.1 s |
+> Segment A talks to the real Swiggy server, so its step timings shift with
+> network latency. **Always place segment A's audio using the `live_marks.json`
+> written by the take you actually recorded**, not the numbers below.
+> Segment B is deterministic and scales linearly with `--speed`.
 
 Voice: male, Indian English if available, calm and conversational — a builder
-walking someone through their project, not an advertisement.
+walking someone through their work, not an advertisement.
 
 ---
 
-### 1 — `01_opening` @ 0:00.0 (30.6 s)
+## Segment A — live against the real Swiggy Food MCP
 
-Hi, I'm Supreeth. This is Sustenance Sentinel, built on the Swiggy Food MCP. The problem is simple: people buried in work skip meals, and the person who loves them finds out too late. Sentinel checks in during every meal window, and only if they genuinely haven't eaten does it order something safe. Five agents do the work. An Orchestrator runs the window, a Messenger writes the check-ins, the Concierge talks to Swiggy, a Guardian enforces diet and budget in code, and Notify closes the loop.
+| # | Section id | Starts | Budget |
+|---|---|---|---|
+| A1 | `live_01` | 0:00 | 13.0 s |
+| A2 | `live_02` | 0:13 | 13.0 s |
+| A3 | `live_03` | 0:26 | 19.1 s* |
+| A4 | `live_04` | 0:45 | 13.0 s |
+| A5 | `live_05` | 0:58 | 13.0 s |
+| A6 | `live_06` | 1:11 | 13.0 s |
 
-### 2 — `02_ladder` @ 0:30.6 (17.6 s)
+\* varies with network; trust the recorded manifest.
 
-This is the part I care most about. If she doesn't reply, we never assume she's hungry. Silence walks through a check-in, a nudge, then a last call with a countdown. That turns silence into an explicit opt-out.
+### A1 — `live_01` (13.0 s)
 
-### 3 — `03_scenario_a` @ 0:48.2 (17.3 s)
+This is Sustenance Sentinel, running against the real Swiggy Food MCP. It authenticates with OAuth 2.1 and PKCE, registering itself dynamically, so there's no client ID to request from anyone.
 
-Scenario A. She types "had a sandwich at my desk" — free text, not a button. The Messenger understands it, the window closes, and nothing gets ordered. Every decision is written to an audit trace you can replay.
+### A2 — `live_02` (13.0 s)
 
-### 4 — `04_scenario_b` @ 1:05.5 (25.3 s)
+Handshake, then tools list. Eighteen live tools come back — one more than the docs describe. Discovery, cart, coupons, payment, and order tracking.
 
-Scenario B is the one everybody gets wrong. She simply forgets to reply. Check-in, nudge, last call, the countdown expires — and nothing is ordered. No food shows up uninvited, no money moves. In confirm-first mode, silence is never treated as consent. This is the failure mode I designed the whole system around.
+### A3 — `live_03` (13.0 s — do not exceed, slot may be longer)
 
-### 5 — `05_scenario_c` @ 1:30.8 (26.8 s)
+Now my real saved addresses. One of them is my hometown, which has no delivery coverage at all, so Sentinel scores each address by how many of your favourites it actually serves, and pins the best one.
 
-Same silence in Scenario C, but here she has explicitly opted into full autonomy. Now the Concierge searches her favourite restaurants through the Swiggy Food MCP, reads the menus, and ranks toward her comfort food. The Guardian clears it on diet and budget. The order goes through — a khichdi bowl, two hundred and sixty rupees — and her partner gets the confirmation with an ETA.
+### A4 — `live_04` (13.0 s)
 
-### 6 — `06_scenario_d` @ 1:57.6 (21.4 s)
+Searching my actual favourite restaurants through the live server. Ten open near that address for each. Everything closed right now is filtered out.
 
-Scenario D. She asks for food, but breakfast already spent the daily cap. The Guardian vetoes every single candidate. That gate is plain Python, not a prompt, so the model cannot talk its way around it. Order placement is only ever called from behind the Guardian.
+### A5 — `live_05` (13.0 s)
 
-### 7 — `07_close` @ 2:19.0 (20.1 s)
+A real menu, live. Twenty-one in-stock items with real prices and real veg flags. The API exposes no calories or spice, so those rules simply stand down rather than guessing.
 
-Today this runs against a mock Swiggy backend, so no real orders fire while I build, with fifteen tests over the policy gate and the ladder. The client is already wired to the documented spec — streamable HTTP, OAuth 2.1 with PKCE. The code is public. Thanks for taking a look.
+### A6 — `live_06` (13.0 s)
+
+And the whole pipeline on live data. The Concierge ranked over a hundred real dishes, the Guardian cleared one on diet and budget. Nothing was ordered — this path is read only.
+
+---
+
+## Segment B — the safety behaviour (deterministic, offline)
+
+Offsets are from `run_demo.py --speed 2`. Add segment A's total length when
+placing these on the concatenated timeline.
+
+| # | Section id | Starts (in B) | Budget |
+|---|---|---|---|
+| B1 | `01_opening` | 0:00 | 20.4 s |
+| B2 | `02_ladder` | 0:20 | 11.7 s |
+| B3 | `03_scenario_a` | 0:32 | 11.6 s |
+| B4 | `04_scenario_b` | 0:44 | 16.8 s |
+| B5 | `05_scenario_c` | 1:00 | 17.9 s |
+| B6 | `06_scenario_d` | 1:18 | 14.3 s |
+| B7 | `07_close` | 1:33 | 13.4 s |
+
+### B1 — `01_opening` (20.4 s)
+
+That's the plumbing. This is the point of it. People buried in work skip meals, and whoever loves them finds out too late. Five agents do the work: an orchestrator, a messenger, the concierge that talks to Swiggy, a guardian, and notify.
+
+### B2 — `02_ladder` (11.7 s)
+
+Here's what I care about most. If she doesn't reply, we never assume she's hungry. Silence walks through a check-in, a nudge, then a countdown.
+
+### B3 — `03_scenario_a` (11.6 s)
+
+She types "had a sandwich at my desk" — free text, not a button. The messenger understands it, the window closes, nothing is ordered.
+
+### B4 — `04_scenario_b` (16.8 s)
+
+This is the one everybody gets wrong. She simply forgets to reply. Check-in, nudge, last call, countdown expires — and nothing is ordered. Silence is never treated as consent.
+
+### B5 — `05_scenario_c` (17.9 s)
+
+Same silence, but here she's opted into full autonomy. The concierge picks her comfort food, the guardian clears it on diet and budget, the order goes through, and her partner gets the confirmation with an ETA.
+
+### B6 — `06_scenario_d` (14.3 s)
+
+Now she asks for food, but breakfast already spent the daily cap. The guardian vetoes every candidate. That gate is plain Python, not a prompt, so the model cannot talk its way around it.
+
+### B7 — `07_close` (13.4 s)
+
+Order placement sits behind that gate and is never handed to the model directly. Fifteen tests cover the policy and the ladder. The code is public. Thanks for taking a look.
