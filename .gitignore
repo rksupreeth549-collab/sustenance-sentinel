@@ -12,3 +12,6 @@ voiceover*/
 .swiggy_auth.json
 live_marks.json
 mock_marks.json
+concat.txt
+segA*.mp4
+segB*.mp4
