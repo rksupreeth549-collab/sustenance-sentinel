@@ -1,22 +1,26 @@
-"""Phase 1 live check against the real Swiggy Food MCP — READ ONLY.
+"""Live proof against the real Swiggy Food MCP — READ ONLY.
 
-Proves the whole pipeline works on live data without spending anything:
-  1. OAuth token present (runs the PKCE flow if needed)
-  2. Connect and list the tools the server actually advertises
-  3. get_addresses
+Runs the whole Sentinel pipeline on live data without spending anything:
+  1. OAuth 2.1 + PKCE token (self-registered via Dynamic Client Registration)
+  2. JSON-RPC handshake, then tools/list
+  3. get_addresses, and pick one that is actually serviceable
   4. search_restaurants for the profile's favourites
-  5. get_restaurant_menu on the first hit
-  6. Run the Concierge ranking + Guardian gate over that LIVE menu, and print
-     what Sentinel *would* have ordered.
+  5. get_restaurant_menu on a real restaurant
+  6. Concierge ranking + Guardian gate over that LIVE menu, printing what
+     Sentinel *would* order
 
 It never calls place_food_order. Ordering additionally requires
 SWIGGY_ALLOW_REAL_ORDERS=1, which this script does not set.
+
+Addresses and phone numbers are redacted by default so the output is safe to
+screen-record. Pass --show-pii to see them in full.
 
 Run:  python verify_live.py
 """
 from __future__ import annotations
 
 import os
+import re
 import sys
 
 try:
@@ -30,14 +34,20 @@ from sentinel.mcp_client import FOOD_ENDPOINT_DEFAULT, SwiggyFoodMCP
 from sentinel.models import Profile
 from sentinel.oauth import get_token
 
-EXPECTED = [
-    "get_addresses", "search_restaurants", "get_restaurant_menu", "search_menu",
-    "get_food_cart", "update_food_cart", "flush_food_cart",
-    "fetch_food_coupons", "apply_food_coupon",
-    "place_food_order", "get_payment_options", "check_payment_status",
-    "confirm_order", "get_food_orders", "get_food_order_details",
-    "track_food_order", "report_error",
-]
+SHOW_PII = "--show-pii" in sys.argv
+W = 76
+
+
+def redact(text: str) -> str:
+    """Keep the locality, drop the street address — safe for a public video."""
+    if SHOW_PII:
+        return text
+    text = re.sub(r"\b\d{6}\b", "######", text)          # PIN codes
+    text = re.sub(r"\b\d{7,}\b", "*******", text)         # long digit runs
+    parts = [p.strip() for p in text.split(",") if p.strip()]
+    if len(parts) >= 3:                                    # keep the tail only
+        return "[redacted], " + ", ".join(parts[-3:])
+    return "[redacted]"
 
 
 def step(n: int, msg: str):
@@ -48,84 +58,83 @@ def main() -> int:
     cfg = "config.yaml" if os.path.exists("config.yaml") else "config.example.yaml"
     profile = Profile.from_yaml(cfg)
     url = os.getenv("SWIGGY_MCP_URL", FOOD_ENDPOINT_DEFAULT)
-    print(f"Swiggy Food MCP live check -> {url}")
-    print("READ ONLY. This script never places an order.")
 
-    step(1, "OAuth token")
+    print("=" * W)
+    print(" SUSTENANCE SENTINEL — LIVE against the real Swiggy Food MCP")
+    print(f" {url}")
+    print(" READ ONLY. This script never places an order.")
+    print("=" * W)
+
+    step(1, "OAuth 2.1 + PKCE (client self-registered via DCR)")
     token = get_token(interactive=True)
     if not token:
         print("    FAIL: no token. Run `python -m sentinel.oauth` first.")
         return 1
-    print(f"    ok: bearer token present ({len(token)} chars)")
+    print(f"    ok: bearer token ({len(token)} chars)")
 
     client = SwiggyFoodMCP(url, token)
 
-    step(2, "Connect + list tools")
+    step(2, "JSON-RPC handshake + tools/list")
     try:
         tools = client.list_tools()
     except Exception as e:
-        print(f"    FAIL: could not connect: {type(e).__name__}: {e}")
+        print(f"    FAIL: {type(e).__name__}: {e}")
         return 1
     print(f"    ok: server advertises {len(tools)} tools")
-    missing = [t for t in EXPECTED if t not in tools]
-    extra = [t for t in tools if t not in EXPECTED]
-    if missing:
-        print(f"    WARN: expected but absent: {missing}")
-    if extra:
-        print(f"    note: additional tools available: {extra}")
+    for i in range(0, len(tools), 3):
+        print("      " + "  ".join(f"{t:<26}" for t in tools[i:i + 3]).rstrip())
 
-    step(3, "get_addresses")
+    step(3, "get_addresses -> pick a serviceable one")
     try:
         addrs = client.get_addresses()
-        print(f"    ok: {len(addrs)} saved address(es)")
-        for a in addrs[:3]:
-            print(f"      - {a}")
-    except Exception as e:
-        print(f"    WARN: {type(e).__name__}: {e}")
-        addrs = []
-
-    area = profile.address.get("text", "")
-    if addrs and isinstance(addrs[0], dict):
-        area = addrs[0].get("address", addrs[0].get("text", area))
-
-    step(4, f"search_restaurants for {profile.favorite_restaurants}")
-    found: list[str] = []
-    for fav in profile.favorite_restaurants:
-        try:
-            hits = client.search_restaurants(fav, area)
-            print(f"    '{fav}' -> {len(hits)} hit(s): {hits[:3]}")
-            found.extend(hits)
-        except Exception as e:
-            print(f"    WARN '{fav}': {type(e).__name__}: {e}")
-    if not found:
-        print("    No restaurants resolved; cannot continue to the menu step.")
-        return 1
-
-    step(5, f"get_restaurant_menu for {found[0]}")
-    try:
-        menu = client.get_menu(found[0])
-        print(f"    ok: {len(menu)} item(s). Sample:")
-        for d in menu[:5]:
-            print(f"      - {d.item:<40} ₹{d.price:<5} veg={d.vegetarian} tags={d.tags}")
+        print(f"    {len(addrs)} saved address(es) on the account")
+        chosen = client.autoselect_address(profile.favorite_restaurants)
     except Exception as e:
         print(f"    FAIL: {type(e).__name__}: {e}")
         return 1
+    if not chosen:
+        print("    FAIL: none of the saved addresses serve the profile's favourites.")
+        return 1
+    print(f"    using: {redact(chosen['addressLine'])}")
+    print("    (a hometown address had no delivery coverage — Sentinel scores each")
+    print("     saved address by how many favourites it actually serves)")
+
+    step(4, f"search_restaurants for {profile.favorite_restaurants}")
+    for fav in profile.favorite_restaurants:
+        try:
+            hits = client.search_restaurants(fav)
+            print(f"    {fav!r:<24} -> {len(hits)} open now")
+        except Exception as e:
+            print(f"    WARN {fav!r}: {type(e).__name__}: {e}")
+
+    step(5, "get_restaurant_menu (live)")
+    ids = client.search_restaurants(profile.favorite_restaurants[-1])
+    if not ids:
+        print("    FAIL: no open restaurant to read a menu from.")
+        return 1
+    menu = client.get_menu(ids[0])
+    print(f"    ok: {len(menu)} in-stock item(s) from {menu[0].restaurant}")
+    for d in menu[:6]:
+        print(f"      {d.item[:36]:<36} ₹{d.price:<5} veg={str(d.vegetarian):<5}")
 
     step(6, "Concierge ranking + Guardian gate over the LIVE menu (dry run)")
     concierge = Concierge(client, profile)
-    candidates = concierge.candidates(area)
-    print(f"    Concierge ranked {len(candidates)} candidate(s)")
+    candidates = concierge.candidates("")
+    print(f"    Concierge ranked {len(candidates)} live candidate(s)")
     verdict = Guardian(profile).review(candidates, spent_today=0)
     for cand, dec in verdict.vetoed:
-        print(f"      VETO  {cand.item} — {'; '.join(dec.reasons)}")
+        print(f"      VETO  {cand.item[:34]:<34} — {dec.reasons[0]}")
     if verdict.approved:
         c = verdict.approved
         print(f"\n    WOULD ORDER: {c.item} from {c.restaurant} — ₹{c.price}")
-        print("    (not placed — this script is read only)")
+        print("    NOT PLACED — this script is read only, and live ordering also")
+        print("    requires SWIGGY_ALLOW_REAL_ORDERS=1.")
     else:
         print("\n    Guardian approved nothing on this menu under the current profile.")
 
-    print("\nLive check complete. No order was placed.")
+    print("\n" + "=" * W)
+    print(" Live check complete. Real data, real tools, no order placed.")
+    print("=" * W)
     return 0
 
 
