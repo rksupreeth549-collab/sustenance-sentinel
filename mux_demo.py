@@ -106,6 +106,14 @@ def main() -> int:
             fh.write(f"file '{p}'\n")
     subprocess.run([FF, "-hide_banner", "-loglevel", "error", "-y", "-f", "concat",
                     "-safe", "0", "-i", "concat.txt", "-c", "copy",
+                    "demo_v3_concat.mp4"], check=True)
+    # Hold the last frame for a couple of seconds: the closing narration runs
+    # marginally past the end of the recording and would otherwise be clipped.
+    subprocess.run([FF, "-hide_banner", "-loglevel", "error", "-y",
+                    "-i", "demo_v3_concat.mp4",
+                    "-vf", "tpad=stop_mode=clone:stop_duration=1.0",
+                    "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
+                    "-pix_fmt", "yuv420p", "-an",
                     "demo_v3_silent.mp4"], check=True)
 
     print("Building the audio track and muxing")
@@ -117,9 +125,10 @@ def main() -> int:
         f"[{i + 1}:a]adelay={int(off * 1000)}|{int(off * 1000)}[a{i}];"
         for i, (_, off) in enumerate(rows))
     filters += "".join(f"[a{i}]" for i in range(len(rows)))
-    filters += f"amix=inputs={len(rows)}:dropout_transition=0:normalize=0[mix]"
+    filters += (f"amix=inputs={len(rows)}:dropout_transition=0:normalize=0,"
+                "aresample=48000,aformat=channel_layouts=stereo[mix]")
     cmd += ["-filter_complex", filters, "-map", "0:v", "-map", "[mix]",
-            "-c:v", "copy", "-c:a", "aac", "-b:a", "128k", "-shortest",
+            "-c:v", "copy", "-c:a", "aac", "-b:a", "128k",
             "demo_v3_narrated.mp4"]
     subprocess.run(cmd, check=True)
 
